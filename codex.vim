@@ -925,8 +925,4 @@ command! CodexShow call <SID>ShowLog()
 
 nnoremap <silent> <leader>ca :Codex<CR>
 xnoremap <silent> <leader>ca :CodexSelection<CR>
-
-" Keep the old continuation key as an alias to the unified request.
-nnoremap <silent> <leader>cr :Codex<CR>
-
 nnoremap <silent> <leader>cs :CodexShow<CR>
