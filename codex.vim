@@ -157,15 +157,15 @@ function! s:SendRaw(message) abort
     let l:json = json_encode(a:message)
 
     " Log the exact outgoing turn/start request for debugging.
-    if get(a:message, 'method', '') ==# 'turn/start'
-        call writefile([
-                    \ '',
-                    \ '========== OUTGOING turn/start ==========',
-                    \ l:json
-                    \ ],
-                    \ expand('~/.vim/plugin/codex/codex-vim-outgoing.log'),
-                    \ 'a')
-    endif
+    "if get(a:message, 'method', '') ==# 'turn/start'
+    "    call writefile([
+    "                \ '',
+    "                \ '========== OUTGOING turn/start ==========',
+    "                \ l:json
+    "                \ ],
+    "                \ expand('~/.vim/plugin/codex/codex-vim-outgoing.log'),
+    "                \ 'a')
+    "endif
 
     call ch_sendraw(
                 \ job_getchannel(g:codex_vim_job),
@@ -509,14 +509,14 @@ function! s:OnOut(channel, line) abort
     endif
 
     " Log incoming messages separately from JSON parsing.
-    try
-        call writefile(
-                    \ [a:line],
-                    \ expand('~/.vim/plugin/codex/codex-vim-incoming.log'),
-                    \ 'a')
-    catch
-        " Logging failure must not prevent message processing.
-    endtry
+    "try
+    "    call writefile(
+    "                \ [a:line],
+    "                \ expand('~/.vim/plugin/codex/codex-vim-incoming.log'),
+    "                \ 'a')
+    "catch
+    "    " Logging failure must not prevent message processing.
+    "endtry
 
     " Parse the incoming JSON message.
     try
