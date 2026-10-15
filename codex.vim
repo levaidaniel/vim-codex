@@ -429,6 +429,33 @@ function! s:OnOut(channel, line) abort
         return
     endtry
 
+    " Handle server-initiated file-change approval requests first.
+    if get(l:msg, 'method', '') ==# 'item/fileChange/requestApproval'
+        let l:params = get(l:msg, 'params', {})
+        let l:reason = get(l:params, 'reason', '')
+        let l:question = 'Codex fájlmódosítást szeretne végrehajtani.'
+
+        if type(l:reason) == v:t_string && !empty(l:reason)
+            let l:question .= "\nIndok: " . l:reason
+        endif
+
+        let l:choice = confirm(
+                    \ l:question,
+                    \ "&Engedélyezem\n&Elutasítom\n&Megszakítom",
+                    \ 2)
+        let l:decision = l:choice == 1
+                    \ ? 'accept'
+                    \ : (l:choice == 2 ? 'decline' : 'cancel')
+
+        call ch_sendraw(
+                    \ job_getchannel(g:codex_vim_job),
+                    \ json_encode({
+                    \   'id': l:msg.id,
+                    \   'result': {'decision': l:decision}
+                    \ }) . "\n")
+        return
+    endif
+
     " JSON-RPC responses.
     if has_key(l:msg, 'id')
         let l:key = string(l:msg.id)
