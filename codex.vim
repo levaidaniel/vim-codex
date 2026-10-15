@@ -263,47 +263,62 @@ function! s:HandleResponse(text) abort
     let g:codex_vim_last_turn_output = a:text
     let g:codex_vim_output = ''
 
-    let l:mode = matchstr(
-                \ a:text,
-                \ '\c<MODE>\s*\zs[a-zA-Z]\+\ze\s*</MODE>')
+    " Parse the model response as a JSON object.
+    try
+        let l:response = json_decode(trim(a:text))
+    catch
+        call s:LogAppend(
+                    \ "[Hiba: a Codex válasza nem érvényes JSON.]\n"
+                    \ . a:text . "\n")
+        return
+    endtry
 
-    let l:explanation = s:ExtractTag(a:text, 'EXPLANATION')
-
-    if empty(l:explanation)
-        let l:explanation = s:CleanAnswer(a:text)
+    if type(l:response) != v:t_dict
+        call s:LogAppend(
+                    \ "[Hiba: a Codex válasza nem JSON-objektum.]\n"
+                    \ . a:text . "\n")
+        return
     endif
 
-    " A diff is only opened when the response explicitly declares it
-    " and contains a valid CODE section.
-    if tolower(l:mode) ==# 'diff'
-        let l:code = s:ExtractTag(a:text, 'CODE')
+    let l:mode = get(l:response, 'mode', '')
+    let l:explanation = get(l:response, 'explanation', '')
+    let l:code = get(l:response, 'code', v:null)
 
-        if !empty(l:code)
-            call s:LogAppend(l:explanation . "\n")
+    if type(l:explanation) != v:t_string
+        let l:explanation = ''
+    endif
 
-            try
-                call s:OpenDiff(l:code)
-            catch
-                call s:LogAppend(
-                            \ "\n[CodexDiff hiba: "
-                            \ . v:exception . "]\n")
-                call s:LogAppend(s:CleanAnswer(a:text) . "\n")
-            endtry
-
+    if l:mode ==# 'diff'
+        if type(l:code) != v:t_string || empty(l:code)
+            call s:LogAppend(
+                        \ "[Hiba: a diff válaszból hiányzik "
+                        \ . "az érvényes code mező.]\n"
+                        \ . a:text . "\n")
             return
         endif
 
-        call s:LogAppend(
-                    \ "[Nem érkezett érvényes CODE szakasz; "
-                    \ . "a választ szövegként jelenítem meg.]\n")
+        call s:LogAppend(l:explanation . "\n")
+
+        try
+            call s:OpenDiff(l:code)
+        catch
+            call s:LogAppend(
+                        \ "\n[CodexDiff hiba: "
+                        \ . v:exception . "]\n")
+        endtry
+
+        return
     endif
 
-    " Ordinary answer, including responses without valid tags.
-    if empty(l:explanation)
-        let l:explanation = a:text
+    if l:mode ==# 'answer'
+        call s:LogAppend(l:explanation . "\n")
+        return
     endif
 
-    call s:LogAppend(l:explanation . "\n")
+    call s:LogAppend(
+                \ "[Hiba: ismeretlen válaszmód: "
+                \ . string(l:mode) . "]\n"
+                \ . a:text . "\n")
 endfunction
 
 
@@ -700,27 +715,23 @@ function! s:StartRequest(prompt, ctx) abort
     " A diff response must replace the selected region or the complete file.
     let g:codex_vim_prompt =
                 \ "You are responding through a classic Vim plugin.\n"
-                \ . "Classify your response using the exact format below.\n"
-                \ . "If the user asks a question, requests an explanation, "
-                \ . "or wants a code example, use MODE answer.\n"
-                \ . "If the user requests an actual change to the supplied "
-                \ . "current file, use MODE diff.\n"
-                \ . "Do not use diff merely because your answer contains "
-                \ . "an illustrative code snippet.\n"
-                \ . "For diff, CODE must contain only the replacement text: "
-                \ . "the selected region if a selection exists, otherwise "
-                \ . "the complete file. No Markdown fences.\n"
-                \ . "For answer, put the complete user-facing answer in "
-                \ . "EXPLANATION and omit CODE.\n"
-                \ . "Always include MODE and EXPLANATION.\n\n"
-                \ . "<MODE>answer</MODE> or <MODE>diff</MODE>\n"
-                \ . "<EXPLANATION>\n"
-                \ . "Your explanation or answer.\n"
-                \ . "</EXPLANATION>\n"
-                \ . "For diff responses only:\n"
-                \ . "<CODE>\n"
-                \ . "Replacement code only.\n"
-                \ . "</CODE>\n\n"
+                \ . "Return exactly one valid JSON object. Do not use "
+                \ . "Markdown fences or add text outside the JSON.\n"
+                \ . "Use this schema:\n"
+                \ . "{\"mode\":\"answer\","
+                \ . "\"explanation\":\"Your answer\","
+                \ . "\"code\":null}\n"
+                \ . "For an actual requested file modification, use "
+                \ . "\"mode\":\"diff\" and put the complete replacement "
+                \ . "text in the string field \"code\".\n"
+                \ . "For questions, explanations and illustrative "
+                \ . "code examples, use \"mode\":\"answer\" and "
+                \ . "set \"code\" to null.\n"
+                \ . "Always include all three fields: mode, "
+                \ . "explanation and code.\n"
+                \ . "For diff, code must replace only the selected "
+                \ . "region if a selection exists; otherwise it must "
+                \ . "contain the complete file.\n\n"
                 \ . "USER REQUEST:\n"
                 \ . a:prompt
                 \ . "\n\nWORKING DIRECTORY:\n"
