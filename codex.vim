@@ -1,51 +1,81 @@
-" Minimal Codex App Server integration for classic Vim.
-" Requires Vim with +job and +channel, plus the Codex CLI.
+" Vim-Codex: Codex App Server integration for classic Vim.
+" Requires Vim +job, +channel, JSON support, and the Codex CLI.
 
 if !has('job') || !has('channel') || !exists('*json_encode')
     echoerr 'vim-codex requires Vim +job, +channel and JSON support'
     finish
 endif
 
+" ---------------------------------------------------------------------------
+" State
+" ---------------------------------------------------------------------------
+
 let g:codex_vim_job = get(g:, 'codex_vim_job', v:null)
 let g:codex_vim_thread = get(g:, 'codex_vim_thread', '')
 let g:codex_vim_next_id = get(g:, 'codex_vim_next_id', 1)
 let g:codex_vim_pending = get(g:, 'codex_vim_pending', {})
-let g:codex_vim_busy = get(g:, 'codex_vim_busy', 0)
-let g:codex_vim_output_buf = get(g:, 'codex_vim_output_buf', -1)
-let g:codex_vim_output = get(g:, 'codex_vim_output', '')
-let g:codex_vim_prompt = get(g:, 'codex_vim_prompt', '')
+let g:codex_vim_busy = 0
+let g:codex_vim_prompt = ''
 let g:codex_vim_cwd = get(g:, 'codex_vim_cwd', '')
 
-let g:codex_vim_diff_mode = 0
-let g:codex_vim_diff_source_buf = -1
-let g:codex_vim_diff_first = 0
-let g:codex_vim_diff_last = 0
-let g:codex_vim_diff_original = []
-
-if !exists('g:codex_vim_log_buf')
-    let g:codex_vim_log_buf = bufnr('Codex-Log')
-endif
-
-if !exists('g:codex_vim_log')
-    let g:codex_vim_log = g:codex_vim_log_buf > 0
-                \ ? join(getbufline(g:codex_vim_log_buf, 1, '$'), "\n") . "\n"
-                \ : ''
-endif
-
+let g:codex_vim_log_buf = get(g:, 'codex_vim_log_buf', -1)
+let g:codex_vim_log = get(g:, 'codex_vim_log', '')
+let g:codex_vim_output = ''
+let g:codex_vim_response_stream = ''
 let g:codex_vim_last_turn_output = ''
 
+" Source snapshot retained until the response has been classified.
+let g:codex_vim_source_buf = -1
+let g:codex_vim_source_path = ''
+let g:codex_vim_source_lines = []
+let g:codex_vim_source_first = 1
+let g:codex_vim_source_last = 1
+let g:codex_vim_source_selection = 0
+
 
 " ---------------------------------------------------------------------------
-" Log rendering
+" Log handling
 " ---------------------------------------------------------------------------
 
-function! s:Render() abort
-    let l:buf = g:codex_vim_log_buf
-
-    if l:buf <= 0 || !bufexists(l:buf)
+function! s:EnsureLog() abort
+    if g:codex_vim_log_buf > 0
+                \ && bufexists(g:codex_vim_log_buf)
         return
     endif
 
+    let l:buf = bufnr('Codex-Log')
+
+    if l:buf > 0
+        let g:codex_vim_log_buf = l:buf
+        let g:codex_vim_log =
+                    \ join(getbufline(l:buf, 1, '$'), "\n")
+                    \ . "\n"
+        return
+    endif
+
+    let l:current_win = win_getid()
+
+    botright 8new
+    silent file Codex-Log
+
+    let g:codex_vim_log_buf = bufnr('%')
+
+    setlocal buftype=nofile
+    setlocal bufhidden=hide
+    setlocal noswapfile
+    setlocal nowrap
+    setlocal filetype=markdown
+
+    if win_id2win(l:current_win) > 0
+        call win_gotoid(l:current_win)
+    endif
+endfunction
+
+
+function! s:Render() abort
+    call s:EnsureLog()
+
+    let l:buf = g:codex_vim_log_buf
     let l:text = g:codex_vim_log . g:codex_vim_output
     let l:lines = split(l:text, "\n", 1)
 
@@ -53,16 +83,18 @@ function! s:Render() abort
         let l:lines = ['']
     endif
 
-    let l:old_count = len(getbufline(l:buf, 1, '$'))
-
     call setbufline(l:buf, 1, l:lines)
 
+    let l:old_count = len(getbufline(l:buf, 1, '$'))
+
     if l:old_count > len(l:lines)
-        call deletebufline(l:buf, len(l:lines) + 1, l:old_count)
+        call deletebufline(
+                    \ l:buf,
+                    \ len(l:lines) + 1,
+                    \ l:old_count)
     endif
 
-    " Follow new output when the log is visible, without leaving its window
-    " focused if the user was working elsewhere.
+    " Follow output if the log is visible, without changing focus.
     let l:winnr = bufwinnr(l:buf)
 
     if l:winnr > 0
@@ -84,43 +116,30 @@ function! s:LogAppend(text) abort
 endfunction
 
 
-function! s:ShowLog() abort
-    let l:buf = g:codex_vim_log_buf
-
-    if l:buf > 0 && bufexists(l:buf)
-        let l:winnr = bufwinnr(l:buf)
-
-        if l:winnr > 0
-            execute l:winnr . 'wincmd w'
-            return
-        endif
-
-        botright split
-        execute 'buffer ' . l:buf
-    else
-        botright new
-        silent file Codex-Log
-
-        let g:codex_vim_log_buf = bufnr('%')
-
-        setlocal buftype=nofile
-        setlocal bufhidden=hide
-        setlocal noswapfile
-        setlocal nowrap
-    endif
-
-    let g:codex_vim_output_buf = g:codex_vim_log_buf
-endfunction
-
-
 function! s:Append(text) abort
     let g:codex_vim_output .= a:text
     call s:Render()
 endfunction
 
 
+function! s:ShowLog() abort
+    call s:EnsureLog()
+
+    let l:winnr = bufwinnr(g:codex_vim_log_buf)
+
+    if l:winnr > 0
+        execute l:winnr . 'wincmd w'
+        return
+    endif
+
+    botright 8split
+    execute 'buffer ' . g:codex_vim_log_buf
+    setlocal nowrap
+endfunction
+
+
 " ---------------------------------------------------------------------------
-" Codex App Server JSON-RPC
+" JSON-RPC
 " ---------------------------------------------------------------------------
 
 function! s:SendRaw(message) abort
@@ -129,17 +148,17 @@ function! s:SendRaw(message) abort
     endif
 
     call ch_sendraw(
-        \ job_getchannel(g:codex_vim_job),
-        \ json_encode(a:message) . "\n")
+                \ job_getchannel(g:codex_vim_job),
+                \ json_encode(a:message) . "\n")
 endfunction
 
 
 function! s:Notify(method, params) abort
     call s:SendRaw({
-        \ 'jsonrpc': '2.0',
-        \ 'method': a:method,
-        \ 'params': a:params
-        \ })
+                \ 'jsonrpc': '2.0',
+                \ 'method': a:method,
+                \ 'params': a:params
+                \ })
 endfunction
 
 
@@ -150,29 +169,34 @@ function! s:Request(method, params, kind) abort
     let g:codex_vim_pending[string(l:id)] = a:kind
 
     call s:SendRaw({
-        \ 'jsonrpc': '2.0',
-        \ 'id': l:id,
-        \ 'method': a:method,
-        \ 'params': a:params
-        \ })
+                \ 'jsonrpc': '2.0',
+                \ 'id': l:id,
+                \ 'method': a:method,
+                \ 'params': a:params
+                \ })
 
     return l:id
 endfunction
 
 
 function! s:SendTurn() abort
+    if empty(g:codex_vim_thread)
+        throw 'No Codex conversation thread is available'
+    endif
+
     let g:codex_vim_busy = 1
-    let g:codex_vim_output = 'Waiting for Codex...'
+    let g:codex_vim_response_stream = ''
+    let g:codex_vim_output = 'Codex dolgozik...'
 
     call s:Render()
 
     call s:Request('turn/start', {
-        \ 'threadId': g:codex_vim_thread,
-        \ 'input': [{
-        \   'type': 'text',
-        \   'text': g:codex_vim_prompt
-        \ }]
-        \ }, 'turn')
+                \ 'threadId': g:codex_vim_thread,
+                \ 'input': [{
+                \   'type': 'text',
+                \   'text': g:codex_vim_prompt
+                \ }]
+                \ }, 'turn')
 endfunction
 
 
@@ -202,56 +226,157 @@ endfunction
 
 
 " ---------------------------------------------------------------------------
+" Response parsing
+" ---------------------------------------------------------------------------
+
+function! s:ExtractTag(text, tag) abort
+  let l:pattern = '\c<' . a:tag . '>\s*\zs\_.\{-}\ze\s*</' . a:tag . '>'
+  let l:value = matchstr(a:text, l:pattern)
+  return trim(l:value)
+endfunction
+
+
+function! s:CleanAnswer(text) abort
+    let l:text = substitute(
+                \ a:text,
+                \ '\c<MODE>\s*\(answer\|diff\)\s*</MODE>',
+                \ '',
+                \ 'g')
+
+    let l:text = substitute(
+                \ l:text,
+                \ '\c</\?EXPLANATION>',
+                \ '',
+                \ 'g')
+
+    let l:text = substitute(
+                \ l:text,
+                \ '\c</\?CODE>',
+                \ '',
+                \ 'g')
+
+    return substitute(l:text, '^\n\+', '', '')
+endfunction
+
+
+function! s:HandleResponse(text) abort
+    let g:codex_vim_last_turn_output = a:text
+    let g:codex_vim_output = ''
+
+    let l:mode = matchstr(
+                \ a:text,
+                \ '\c<MODE>\s*\zs[a-zA-Z]\+\ze\s*</MODE>')
+
+    let l:explanation = s:ExtractTag(a:text, 'EXPLANATION')
+
+    if empty(l:explanation)
+        let l:explanation = s:CleanAnswer(a:text)
+    endif
+
+    " A diff is only opened when the response explicitly declares it
+    " and contains a valid CODE section.
+    if tolower(l:mode) ==# 'diff'
+        let l:code = s:ExtractTag(a:text, 'CODE')
+
+        if !empty(l:code)
+            call s:LogAppend(l:explanation . "\n")
+
+            try
+                call s:OpenDiff(l:code)
+            catch
+                call s:LogAppend(
+                            \ "\n[CodexDiff hiba: "
+                            \ . v:exception . "]\n")
+                call s:LogAppend(s:CleanAnswer(a:text) . "\n")
+            endtry
+
+            return
+        endif
+
+        call s:LogAppend(
+                    \ "[Nem érkezett érvényes CODE szakasz; "
+                    \ . "a választ szövegként jelenítem meg.]\n")
+    endif
+
+    " Ordinary answer, including responses without valid tags.
+    if empty(l:explanation)
+        let l:explanation = a:text
+    endif
+
+    call s:LogAppend(l:explanation . "\n")
+endfunction
+
+
+" ---------------------------------------------------------------------------
 " Diff view
 " ---------------------------------------------------------------------------
 
-function! s:OpenDiff() abort
-    let l:source_buf = g:codex_vim_diff_source_buf
+function! s:OpenDiff(code) abort
+    let l:source_buf = g:codex_vim_source_buf
 
     if l:source_buf <= 0 || !bufexists(l:source_buf)
-        echoerr 'CodexDiff: original buffer no longer exists'
-        return
+        throw 'Original source buffer no longer exists'
     endif
 
-    let l:text = substitute(
-                \ g:codex_vim_last_turn_output, '^\s\+', '', '')
-    let l:text = substitute(l:text, '\s\+$', '', '')
+    let l:text = substitute(a:code, '^\n\+', '', '')
+    let l:text = substitute(l:text, '\n\+$', '', '')
+
     let l:replacement = split(l:text, "\n", 1)
 
-    " Remove Markdown fences if Codex included them.
-    if !empty(l:replacement) && l:replacement[0] =~# '^```'
+    " Remove optional Markdown fences.
+    if !empty(l:replacement)
+                \ && l:replacement[0] =~# '^\s*```'
         call remove(l:replacement, 0)
 
         if !empty(l:replacement)
-                    \ && l:replacement[-1] =~# '^```'
+                    \ && l:replacement[-1] =~# '^\s*```'
             call remove(l:replacement, -1)
         endif
     endif
 
     if empty(l:replacement)
-        echoerr 'CodexDiff: Codex returned no replacement code'
-        return
+        let l:replacement = ['']
     endif
 
-    " Build a full-file proposal, replacing only the selected lines.
-    let l:original = g:codex_vim_diff_original
+    " Build the proposed full file.
+    let l:original = g:codex_vim_source_lines
     let l:proposal = []
 
-    if g:codex_vim_diff_first > 1
+    if g:codex_vim_source_first > 1
         let l:proposal = l:original[
-                    \ 0 : g:codex_vim_diff_first - 2]
+                    \ 0 : g:codex_vim_source_first - 2]
     endif
 
     let l:proposal += l:replacement
 
-    if g:codex_vim_diff_last < len(l:original)
-        let l:proposal += l:original[g:codex_vim_diff_last :]
+    if g:codex_vim_source_last < len(l:original)
+        let l:proposal += l:original[
+                    \ g:codex_vim_source_last :]
     endif
 
-    " Open a new tab showing the original and proposed versions.
+    let l:log_buf = g:codex_vim_log_buf
+
+    " New tab: original and proposal above, shared log below.
     tabnew
     execute 'buffer ' . l:source_buf
-    call cursor(g:codex_vim_diff_first, 1)
+
+    belowright 8split
+
+    if l:log_buf > 0 && bufexists(l:log_buf)
+        execute 'buffer ' . l:log_buf
+    else
+        silent file Codex-Log
+        let g:codex_vim_log_buf = bufnr('%')
+
+        setlocal buftype=nofile
+        setlocal bufhidden=hide
+        setlocal noswapfile
+        setlocal nowrap
+    endif
+
+    wincmd k
+
+    call cursor(g:codex_vim_source_first, 1)
 
     rightbelow vnew
     execute 'file Codex-Proposal-' . bufnr('%')
@@ -269,12 +394,12 @@ function! s:OpenDiff() abort
     diffthis
     wincmd l
 
-    echo 'CodexDiff: review the proposal; the original has not been changed.'
+    echo 'Codex: diffjavaslat megnyitva; az eredeti fájl változatlan.'
 endfunction
 
 
 " ---------------------------------------------------------------------------
-" Server output callbacks
+" Codex App Server output callbacks
 " ---------------------------------------------------------------------------
 
 function! s:OnOut(channel, line) abort
@@ -289,7 +414,7 @@ function! s:OnOut(channel, line) abort
         return
     endtry
 
-    " Responses to our JSON-RPC requests.
+    " JSON-RPC responses.
     if has_key(l:msg, 'id')
         let l:key = string(l:msg.id)
         let l:kind = get(g:codex_vim_pending, l:key, '')
@@ -300,12 +425,15 @@ function! s:OnOut(channel, line) abort
 
         if has_key(l:msg, 'error')
             let l:err = get(
-                        \ l:msg.error, 'message', string(l:msg.error))
-
-            call s:Append("\n[Codex error: " . l:err . "]")
+                        \ l:msg.error,
+                        \ 'message',
+                        string(l:msg.error))
 
             let g:codex_vim_busy = 0
-            let g:codex_vim_diff_mode = 0
+            let g:codex_vim_output = ''
+
+            call s:LogAppend(
+                        \ "\n[Codex hiba: " . l:err . "]\n")
             return
         endif
 
@@ -313,8 +441,8 @@ function! s:OnOut(channel, line) abort
             call s:Notify('initialized', {})
 
             call s:Request('thread/start', {
-                \ 'cwd': g:codex_vim_cwd
-                \ }, 'thread')
+                        \ 'cwd': g:codex_vim_cwd
+                        \ }, 'thread')
 
         elseif l:kind ==# 'thread'
             let l:result = get(l:msg, 'result', {})
@@ -323,10 +451,11 @@ function! s:OnOut(channel, line) abort
             let g:codex_vim_thread = get(l:thread, 'id', '')
 
             if empty(g:codex_vim_thread)
-                call s:Append(
-                            \ "\n[Codex error: thread/start returned no thread ID]")
-
                 let g:codex_vim_busy = 0
+                let g:codex_vim_output = ''
+
+                call s:LogAppend(
+                            \ "\n[Codex hiba: thread ID hiányzik]\n")
                 return
             endif
 
@@ -336,74 +465,66 @@ function! s:OnOut(channel, line) abort
         return
     endif
 
-    " Streaming assistant text.
     let l:method = get(l:msg, 'method', '')
-    let l:normalized = substitute(tolower(l:method), '_', '', 'g')
+    let l:normalized = substitute(
+                \ tolower(l:method),
+                \ '_',
+                \ '',
+                \ 'g')
     let l:params = get(l:msg, 'params', {})
 
+    " Accumulate the entire response without rendering code into the chat.
     if stridx(l:normalized, 'agentmessage') >= 0
                 \ && stridx(l:normalized, 'delta') >= 0
 
         let l:delta = get(l:params, 'delta', '')
 
         if type(l:delta) == v:t_string && !empty(l:delta)
-            if g:codex_vim_output ==# 'Waiting for Codex...'
-                let g:codex_vim_output = ''
-            endif
-
-            call s:Append(l:delta)
+            let g:codex_vim_response_stream .= l:delta
         endif
 
     elseif l:method ==# 'turn/completed'
         let g:codex_vim_busy = 0
 
-        if g:codex_vim_output ==# 'Waiting for Codex...'
-                    \ || g:codex_vim_output ==# 'Starting Codex...'
-                    \ || empty(g:codex_vim_output)
+        let l:response = g:codex_vim_response_stream
 
-            let l:final = s:ExtractFinalText(l:params)
-
-            if !empty(l:final)
-                let g:codex_vim_output = l:final
-            else
-                let g:codex_vim_output =
-                            \ '[Turn completed; no assistant text was captured.]'
-            endif
+        if empty(l:response)
+            let l:response = s:ExtractFinalText(l:params)
         endif
 
-        let g:codex_vim_last_turn_output = g:codex_vim_output
-
-        call s:LogAppend(g:codex_vim_last_turn_output . "\n")
-
+        let g:codex_vim_response_stream = ''
         let g:codex_vim_output = ''
-        call s:Render()
 
-        if g:codex_vim_diff_mode
-            let g:codex_vim_diff_mode = 0
-
-            try
-                call s:OpenDiff()
-            catch
-                echoerr 'CodexDiff error: ' . v:exception
-            endtry
+        if empty(l:response)
+            call s:LogAppend(
+                        \ "[A Codex-turn befejeződött, "
+                        \ . "de nem érkezett szöveges válasz.]\n")
+            return
         endif
+
+        call s:HandleResponse(l:response)
 
     elseif l:method ==# 'error'
-        call s:Append("\n[Codex: "
-                    \ . get(l:params, 'message', 'unknown error') . "]")
+        let g:codex_vim_busy = 0
+        let g:codex_vim_output = ''
+
+        call s:LogAppend(
+                    \ "\n[Codex hiba: "
+                    \ . get(l:params, 'message', 'unknown error')
+                    \ . "]\n")
     endif
 endfunction
 
 
 function! s:OnErr(channel, line) abort
     if !empty(a:line)
-        call s:Append("\n[Codex stderr] " . a:line)
+        call s:LogAppend("\n[Codex stderr] " . a:line . "\n")
     endif
 endfunction
 
 
 " ---------------------------------------------------------------------------
-" Start Codex App Server if necessary
+" Server lifecycle
 " ---------------------------------------------------------------------------
 
 function! s:EnsureServer() abort
@@ -417,112 +538,225 @@ function! s:EnsureServer() abort
     let g:codex_vim_pending = {}
 
     let g:codex_vim_job = job_start(
-        \ ['codex', 'app-server', '--listen', 'stdio://'],
-        \ {
-        \   'in_io': 'pipe',
-        \   'out_io': 'pipe',
-        \   'err_io': 'pipe',
-        \   'in_mode': 'raw',
-        \   'out_mode': 'nl',
-        \   'err_mode': 'nl',
-        \   'out_cb': function('s:OnOut'),
-        \   'err_cb': function('s:OnErr')
-        \ })
+                \ ['codex', 'app-server', '--listen', 'stdio://'],
+                \ {
+                \   'in_io': 'pipe',
+                \   'out_io': 'pipe',
+                \   'err_io': 'pipe',
+                \   'in_mode': 'raw',
+                \   'out_mode': 'nl',
+                \   'err_mode': 'nl',
+                \   'out_cb': function('s:OnOut'),
+                \   'err_cb': function('s:OnErr')
+                \ })
 
     if job_status(g:codex_vim_job) !=# 'run'
         throw 'Could not start codex app-server'
     endif
 
     call s:Request('initialize', {
-        \ 'clientInfo': {
-        \   'name': 'vim-codex',
-        \   'title': 'Vim Codex',
-        \   'version': '0.1.0'
-        \ }
-        \ }, 'initialize')
+                \ 'clientInfo': {
+                \   'name': 'vim-codex',
+                \   'title': 'Vim Codex',
+                \   'version': '0.1.0'
+                \ }
+                \ }, 'initialize')
 endfunction
 
 
 " ---------------------------------------------------------------------------
-" Ask Codex
+" Prompt editor
 " ---------------------------------------------------------------------------
 
-function! s:Ask(prompt, diff_mode, has_selection, first, last) abort
+let g:codex_vim_prompt_context = {}
+
+
+function! s:OpenPrompt(prompt, has_selection, first, last) abort
     if g:codex_vim_busy
         echoerr 'Codex is still working on the previous request'
         return
     endif
 
-    if a:diff_mode && !a:has_selection
-        echoerr 'CodexDiff requires a visual selection'
-        return
-    endif
+    " If opened from Codex-Log, preserve the previous source context.
+    if bufnr('%') == g:codex_vim_log_buf
+                \ && g:codex_vim_source_buf > 0
+                \ && bufexists(g:codex_vim_source_buf)
 
-    let l:source = expand('%:p')
-    let l:source_buf = bufnr('%')
-    let l:original = getline(1, '$')
-    let l:code = ''
-
-    if a:has_selection
-        let l:code = join(getline(a:first, a:last), "\n")
-    endif
-
-    let l:prompt = a:prompt
-
-    if empty(l:prompt)
-        let l:prompt = input('Codex prompt: ')
-    endif
-
-    if empty(l:prompt)
-        return
-    endif
-
-    let g:codex_vim_cwd = getcwd()
-    let g:codex_vim_diff_mode = a:diff_mode
-
-    if a:diff_mode
-        let g:codex_vim_diff_source_buf = l:source_buf
-        let g:codex_vim_diff_first = a:first
-        let g:codex_vim_diff_last = a:last
-        let g:codex_vim_diff_original = l:original
-
-        let g:codex_vim_prompt =
-                    \ l:prompt
-                    \ . "\n\nModify only the selected code below."
-                    \ . "\nReturn ONLY the complete replacement code."
-                    \ . "\nDo not include Markdown fences or explanations."
-                    \ . "\nPreserve the intended behavior unless asked otherwise."
-                    \ . "\nFile: " . l:source
-                    \ . "\nSelected code:\n" . l:code
-
-    elseif a:has_selection
-        let g:codex_vim_prompt =
-                    \ l:prompt
-                    \ . "\n\nFile: " . l:source
-                    \ . "\nSelected code:\n```\n" . l:code . "\n```"
+        let l:source_buf = g:codex_vim_source_buf
+        let l:source_lines = copy(g:codex_vim_source_lines)
+        let l:source_path = g:codex_vim_source_path
+        let l:cwd = g:codex_vim_cwd
+        let l:has_selection = g:codex_vim_source_selection
+        let l:first = g:codex_vim_source_first
+        let l:last = g:codex_vim_source_last
 
     else
-        let g:codex_vim_prompt =
-                    \ l:prompt
-                    \ . "\n\nCurrent working directory: " . getcwd()
+        " Otherwise capture the current source buffer normally.
+        let l:source_buf = bufnr('%')
+        let l:source_lines = getline(1, '$')
+        let l:source_path = expand('%:p')
+        let l:cwd = getcwd()
+        let l:has_selection = a:has_selection
 
-        if !empty(l:source)
-            let g:codex_vim_prompt .= "\nCurrent file: " . l:source
-        endif
+        let l:first = a:has_selection ? a:first : 1
+        let l:last = a:has_selection
+                    \ ? a:last
+                    \ : len(l:source_lines)
     endif
 
-    " Open or focus the shared conversation log.
+    let g:codex_vim_prompt_context = {
+                \ 'winid': win_getid(),
+                \ 'source_buf': l:source_buf,
+                \ 'source_lines': l:source_lines,
+                \ 'source_path': l:source_path,
+                \ 'cwd': l:cwd,
+                \ 'has_selection': l:has_selection,
+                \ 'first': l:first,
+                \ 'last': l:last
+                \ }
+
+    botright 8new
+    silent file Codex-Prompt
+
+    setlocal buftype=nofile
+    setlocal bufhidden=wipe
+    setlocal noswapfile
+    setlocal filetype=markdown
+    setlocal wrap
+
+    let l:lines = split(a:prompt, "\n", 1)
+
+    if empty(l:lines)
+        let l:lines = ['']
+    endif
+
+    call setline(1, l:lines)
+    normal! G$
+    startinsert!
+
+    command! -buffer CodexSend call <SID>SubmitPrompt()
+    nnoremap <buffer> <leader>s :call <SID>SubmitPrompt()<CR>
+    inoremap <buffer> <leader>s <Esc>:call <SID>SubmitPrompt()<CR>
+
+    echo 'Vim-Codex: \s = send prompt | :CodexSend'
+endfunction
+
+
+function! s:SubmitPrompt() abort
+    if empty(g:codex_vim_prompt_context)
+        echoerr 'No active Codex prompt'
+        return
+    endif
+
+    let l:prompt = join(getline(1, '$'), "\n")
+
+    if empty(substitute(l:prompt, '\_s', '', 'g'))
+        echoerr 'The Codex prompt is empty'
+        return
+    endif
+
+    let l:ctx = copy(g:codex_vim_prompt_context)
+    let g:codex_vim_prompt_context = {}
+
+    close
+
+    if !win_gotoid(l:ctx.winid)
+        echoerr 'Could not return to the original Vim window'
+        return
+    endif
+
+    call s:StartRequest(l:prompt, l:ctx)
+endfunction
+
+
+" ---------------------------------------------------------------------------
+" Unified request entry point
+" ---------------------------------------------------------------------------
+
+function! s:StartRequest(prompt, ctx) abort
+    if g:codex_vim_busy
+        echoerr 'Codex is still working on the previous request'
+        return
+    endif
+
+    let g:codex_vim_source_buf = a:ctx.source_buf
+    let g:codex_vim_source_path = a:ctx.source_path
+    let g:codex_vim_source_lines = copy(a:ctx.source_lines)
+    let g:codex_vim_source_first = a:ctx.first
+    let g:codex_vim_source_last = a:ctx.last
+    let g:codex_vim_source_selection = a:ctx.has_selection
+    let g:codex_vim_cwd = a:ctx.cwd
+
+    let l:source = g:codex_vim_source_path
+    let l:original = g:codex_vim_source_lines
+    let l:code = join(l:original, "\n")
+    let l:selected = join(
+                \ l:original[
+                \ g:codex_vim_source_first - 1 :
+                \ g:codex_vim_source_last - 1],
+                \ "\n")
+
+    " Always provide enough source context for automatic diff classification.
+    " A diff response must replace the selected region or the complete file.
+    let g:codex_vim_prompt =
+                \ "You are responding through a classic Vim plugin.\n"
+                \ . "Classify your response using the exact format below.\n"
+                \ . "If the user asks a question, requests an explanation, "
+                \ . "or wants a code example, use MODE answer.\n"
+                \ . "If the user requests an actual change to the supplied "
+                \ . "current file, use MODE diff.\n"
+                \ . "Do not use diff merely because your answer contains "
+                \ . "an illustrative code snippet.\n"
+                \ . "For diff, CODE must contain only the replacement text: "
+                \ . "the selected region if a selection exists, otherwise "
+                \ . "the complete file. No Markdown fences.\n"
+                \ . "For answer, put the complete user-facing answer in "
+                \ . "EXPLANATION and omit CODE.\n"
+                \ . "Always include MODE and EXPLANATION.\n\n"
+                \ . "<MODE>answer</MODE> or <MODE>diff</MODE>\n"
+                \ . "<EXPLANATION>\n"
+                \ . "Your explanation or answer.\n"
+                \ . "</EXPLANATION>\n"
+                \ . "For diff responses only:\n"
+                \ . "<CODE>\n"
+                \ . "Replacement code only.\n"
+                \ . "</CODE>\n\n"
+                \ . "USER REQUEST:\n"
+                \ . a:prompt
+                \ . "\n\nWORKING DIRECTORY:\n"
+                \ . g:codex_vim_cwd
+                \ . "\n\nCURRENT FILE:\n"
+                \ . (empty(l:source) ? '[No file name]' : l:source)
+                \ . "\n\nCURRENT FILE CONTENTS:\n"
+                \ . "```text\n" . l:code . "\n```\n"
+
+    if g:codex_vim_source_selection
+        let g:codex_vim_prompt .=
+                    \ "\nThe user has selected lines "
+                    \ . g:codex_vim_source_first . " through "
+                    \ . g:codex_vim_source_last . ".\n"
+                    \ . "If you choose MODE diff, CODE must replace "
+                    \ . "only this selection.\n"
+                    \ . "SELECTED REGION:\n```text\n"
+                    \ . l:selected . "\n```\n"
+    else
+        let g:codex_vim_prompt .=
+                    \ "\nNo visual selection was supplied. If you choose "
+                    \ . "MODE diff, CODE must contain the complete "
+                    \ . "replacement file.\n"
+    endif
+
     call s:ShowLog()
 
-    " Add the question to the persistent log.
     let g:codex_vim_output = ''
+    let g:codex_vim_response_stream = ''
 
     call s:LogAppend(
                 \ "\n\n========== YOU ==========\n"
-                \ . l:prompt
+                \ . a:prompt
                 \ . "\n\n========== CODEX ==========\n")
 
-    let g:codex_vim_output = 'Starting Codex...'
+    let g:codex_vim_output = 'Codex indul...'
     let g:codex_vim_busy = 1
     call s:Render()
 
@@ -534,99 +768,33 @@ function! s:Ask(prompt, diff_mode, has_selection, first, last) abort
         endif
     catch
         let g:codex_vim_busy = 0
-        let g:codex_vim_diff_mode = 0
+        let g:codex_vim_output = ''
 
-        call s:Append("\n[Codex startup error: " . v:exception . "]")
+        call s:LogAppend(
+                    \ "\n[Codex indítási hiba: "
+                    \ . v:exception . "]\n")
     endtry
 endfunction
 
 
 " ---------------------------------------------------------------------------
-" Reply in the existing Codex conversation
+" Commands and mappings
 " ---------------------------------------------------------------------------
 
-function! s:Reply(prompt) abort
-    if g:codex_vim_busy
-        echoerr 'Codex is still working on the previous request'
-        return
-    endif
+" One unified command for both questions and change requests.
+command! -nargs=* Codex
+            \ call <SID>OpenPrompt(<q-args>, 0, 1, 1)
 
-    if empty(g:codex_vim_thread)
-        echoerr 'No Codex conversation yet. Start with :CodexAsk first.'
-        return
-    endif
+" Visual selection: used as context and as the replacement region for diffs.
+command! -range -nargs=* CodexSelection
+            \ call <SID>OpenPrompt(<q-args>, 1, <line1>, <line2>)
 
-    if type(g:codex_vim_job) != v:t_job
-                \ || job_status(g:codex_vim_job) !=# 'run'
-        echoerr 'Codex app-server is not running. Start a new :CodexAsk.'
-        return
-    endif
-
-    let l:prompt = a:prompt
-
-    if empty(l:prompt)
-        let l:prompt = input('Reply to Codex: ')
-    endif
-
-    if empty(l:prompt)
-        return
-    endif
-
-    let g:codex_vim_prompt = l:prompt
-    let g:codex_vim_diff_mode = 0
-
-    call s:ShowLog()
-
-    let g:codex_vim_output = ''
-
-    call s:LogAppend(
-                \ "\n\n========== YOU ==========\n"
-                \ . l:prompt
-                \ . "\n\n========== CODEX ==========\n")
-
-    let g:codex_vim_output = 'Starting Codex...'
-    call s:Render()
-
-    try
-        call s:SendTurn()
-    catch
-        let g:codex_vim_busy = 0
-        call s:Append("\n[Codex reply error: " . v:exception . "]")
-    endtry
-endfunction
-
-
-" ---------------------------------------------------------------------------
-" Commands and key mappings
-" ---------------------------------------------------------------------------
-
-" Normal mode: ask a general question, without automatically sending a line.
-command! -nargs=* CodexAsk
-            \ call <SID>Ask(<q-args>, 0, 0, 0, 0)
-
-" Visual mode: ask a question about the selected lines.
-command! -range -nargs=* CodexAskSelection
-            \ call <SID>Ask(<q-args>, 0, 1, <line1>, <line2>)
-
-" Visual mode: ask for a replacement and open a Vim diff.
-command! -range -nargs=* CodexDiff
-            \ call <SID>Ask(<q-args>, 1, 1, <line1>, <line2>)
-
-" Show the shared Codex log.
 command! CodexShow call <SID>ShowLog()
 
-" Continue the current Codex conversation.
-command! -nargs=* CodexReply call <SID>Reply(<q-args>)
+nnoremap <silent> <leader>ca :Codex<CR>
+xnoremap <silent> <leader>ca :CodexSelection<CR>
 
-" \ca works in both normal and visual mode, with different behavior.
-nnoremap <silent> <leader>ca :CodexAsk<CR>
-xnoremap <silent> <leader>ca :CodexAskSelection<CR>
+" Keep the old continuation key as an alias to the unified request.
+nnoremap <silent> <leader>cr :Codex<CR>
 
-" Diff mode requires a visual selection.
-xnoremap <silent> <leader>cd :CodexDiff<CR>
-
-" Show the shared conversation log.
 nnoremap <silent> <leader>cs :CodexShow<CR>
-
-" Reply to Codex.
-nnoremap <silent> <leader>cr :CodexReply<CR>
