@@ -71,6 +71,9 @@ function! s:EnsureLog() abort
     setlocal noswapfile
     setlocal nowrap
     setlocal filetype=markdown
+    " Keep the history at its normal height when another split is opened
+    " from it; let the source window absorb the resize instead.
+    setlocal winfixheight
 
     if win_id2win(l:current_win) > 0
         call win_gotoid(l:current_win)
@@ -128,19 +131,29 @@ function! s:Append(text) abort
 endfunction
 
 
-function! s:ShowLog() abort
+function! s:ShowLog(...) abort
+    let l:keep_focus = get(a:, 1, 0)
+    let l:current_win = win_getid()
+
     call s:EnsureLog()
 
     let l:winnr = bufwinnr(g:codex_vim_log_buf)
 
     if l:winnr > 0
-        execute l:winnr . 'wincmd w'
+        if !l:keep_focus
+            execute l:winnr . 'wincmd w'
+        endif
         return
     endif
 
     botright 8split
     execute 'buffer ' . g:codex_vim_log_buf
     setlocal nowrap
+    setlocal winfixheight
+
+    if l:keep_focus && win_id2win(l:current_win) > 0
+        call win_gotoid(l:current_win)
+    endif
 endfunction
 
 
@@ -734,15 +747,15 @@ function! s:OpenPrompt(prompt, has_selection, first, last) abort
                 \ 'last': l:last
                 \ }
 
-    if l:from_log
-        " Reuse the chat window instead of creating another split.
-        resize 8
-        silent enew
-    else
-        botright 8new
-    endif
+    " Always open a dedicated prompt window; keep source and chat history visible.
+    botright 8new
 
     silent file Codex-Prompt
+
+    " equalalways may resize all windows after a split is created.
+    " Restore the prompt height and keep it fixed while it is open.
+    resize 8
+    setlocal winfixheight
 
     setlocal buftype=nofile
     setlocal bufhidden=wipe
@@ -784,16 +797,12 @@ function! s:SubmitPrompt() abort
     let l:ctx = copy(g:codex_vim_prompt_context)
     let g:codex_vim_prompt_context = {}
 
-    if get(l:ctx, 'from_log', 0)
-        " Restore the chat buffer in the same window.
-        execute 'buffer ' . g:codex_vim_log_buf
-    else
-        close
+    " Close only the prompt window and return to the window that opened it.
+    close
 
-        if !win_gotoid(l:ctx.winid)
-            echoerr 'Could not return to the original Vim window'
-            return
-        endif
+    if !win_gotoid(l:ctx.winid)
+        echoerr 'Could not return to the original Vim window'
+        return
     endif
 
     call s:StartRequest(l:prompt, l:ctx)
@@ -878,7 +887,7 @@ function! s:StartRequest(prompt, ctx) abort
                     \ . "replacement file.\n"
     endif
 
-    call s:ShowLog()
+    call s:ShowLog(1)
 
     let g:codex_vim_output = ''
     let g:codex_vim_response_stream = ''
