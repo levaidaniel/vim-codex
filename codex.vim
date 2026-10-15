@@ -16,7 +16,6 @@ let g:codex_vim_next_id = get(g:, 'codex_vim_next_id', 1)
 let g:codex_vim_pending = get(g:, 'codex_vim_pending', {})
 let g:codex_vim_busy = 0
 let g:codex_vim_prompt = ''
-let g:codex_vim_pending_prompt = ''
 let g:codex_vim_cwd = get(g:, 'codex_vim_cwd', '')
 
 let g:codex_vim_log_buf = get(g:, 'codex_vim_log_buf', -1)
@@ -204,12 +203,12 @@ function! s:SendTurn() abort
         throw 'No Codex conversation thread is available'
     endif
 
-    if empty(g:codex_vim_pending_prompt)
+    if empty(g:codex_vim_prompt)
         throw 'Codex hiba: a teljes kérés hiányzik'
     endif
 
-    if stridx(g:codex_vim_pending_prompt, 'USER REQUEST:') < 0
-                \ || stridx(g:codex_vim_pending_prompt,
+    if stridx(g:codex_vim_prompt, 'USER REQUEST:') < 0
+                \ || stridx(g:codex_vim_prompt,
                 \ 'CURRENT FILE CONTENTS:') < 0
         throw 'Codex hiba: a kérésből hiányzik a felhasználói utasítás vagy a fájltartalom'
     endif
@@ -224,7 +223,7 @@ function! s:SendTurn() abort
                 \ 'threadId': g:codex_vim_thread,
                 \ 'input': [{
                 \   'type': 'text',
-                \   'text': g:codex_vim_pending_prompt
+                \   'text': g:codex_vim_prompt
                 \ }]
                 \ }, 'turn')
 endfunction
@@ -878,8 +877,6 @@ function! s:StartRequest(prompt, ctx) abort
                     \ . "MODE diff, CODE must contain the complete "
                     \ . "replacement file.\n"
     endif
-
-    let g:codex_vim_pending_prompt = g:codex_vim_prompt
 
     call s:ShowLog()
 
