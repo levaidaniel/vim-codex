@@ -259,35 +259,6 @@ endfunction
 " Response parsing
 " ---------------------------------------------------------------------------
 
-function! s:ExtractTag(text, tag) abort
-  let l:pattern = '\c<' . a:tag . '>\s*\zs\_.\{-}\ze\s*</' . a:tag . '>'
-  let l:value = matchstr(a:text, l:pattern)
-  return trim(l:value)
-endfunction
-
-
-function! s:CleanAnswer(text) abort
-    let l:text = substitute(
-                \ a:text,
-                \ '\c<MODE>\s*\(answer\|diff\)\s*</MODE>',
-                \ '',
-                \ 'g')
-
-    let l:text = substitute(
-                \ l:text,
-                \ '\c</\?EXPLANATION>',
-                \ '',
-                \ 'g')
-
-    let l:text = substitute(
-                \ l:text,
-                \ '\c</\?CODE>',
-                \ '',
-                \ 'g')
-
-    return substitute(l:text, '^\n\+', '', '')
-endfunction
-
 
 function! s:ExtractJsonObject(text) abort
     let l:start = -1
