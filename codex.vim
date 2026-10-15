@@ -16,6 +16,7 @@ let g:codex_vim_next_id = get(g:, 'codex_vim_next_id', 1)
 let g:codex_vim_pending = get(g:, 'codex_vim_pending', {})
 let g:codex_vim_busy = 0
 let g:codex_vim_prompt = ''
+let g:codex_vim_pending_prompt = ''
 let g:codex_vim_cwd = get(g:, 'codex_vim_cwd', '')
 
 let g:codex_vim_log_buf = get(g:, 'codex_vim_log_buf', -1)
@@ -25,12 +26,18 @@ let g:codex_vim_response_stream = ''
 let g:codex_vim_last_turn_output = ''
 
 " Source snapshot retained until the response has been classified.
-let g:codex_vim_source_buf = -1
-let g:codex_vim_source_path = ''
-let g:codex_vim_source_lines = []
-let g:codex_vim_source_first = 1
-let g:codex_vim_source_last = 1
-let g:codex_vim_source_selection = 0
+let g:codex_vim_source_buf =
+            \ get(g:, 'codex_vim_source_buf', -1)
+let g:codex_vim_source_path =
+            \ get(g:, 'codex_vim_source_path', '')
+let g:codex_vim_source_lines =
+            \ get(g:, 'codex_vim_source_lines', [])
+let g:codex_vim_source_first =
+            \ get(g:, 'codex_vim_source_first', 1)
+let g:codex_vim_source_last =
+            \ get(g:, 'codex_vim_source_last', 1)
+let g:codex_vim_source_selection =
+            \ get(g:, 'codex_vim_source_selection', 0)
 
 
 " ---------------------------------------------------------------------------
@@ -147,6 +154,19 @@ function! s:SendRaw(message) abort
         throw 'Codex process is not running'
     endif
 
+    let l:json = json_encode(a:message)
+
+    " Log the exact outgoing turn/start request for debugging.
+    if get(a:message, 'method', '') ==# 'turn/start'
+        call writefile([
+                    \ '',
+                    \ '========== OUTGOING turn/start ==========',
+                    \ l:json
+                    \ ],
+                    \ expand('~/.vim/plugin/codex/codex-vim-outgoing.log'),
+                    \ 'a')
+    endif
+
     call ch_sendraw(
                 \ job_getchannel(g:codex_vim_job),
                 \ json_encode(a:message) . "\n")
@@ -184,6 +204,16 @@ function! s:SendTurn() abort
         throw 'No Codex conversation thread is available'
     endif
 
+    if empty(g:codex_vim_pending_prompt)
+        throw 'Codex hiba: a teljes kérés hiányzik'
+    endif
+
+    if stridx(g:codex_vim_pending_prompt, 'USER REQUEST:') < 0
+                \ || stridx(g:codex_vim_pending_prompt,
+                \ 'CURRENT FILE CONTENTS:') < 0
+        throw 'Codex hiba: a kérésből hiányzik a felhasználói utasítás vagy a fájltartalom'
+    endif
+
     let g:codex_vim_busy = 1
     let g:codex_vim_response_stream = ''
     let g:codex_vim_output = 'Codex dolgozik...'
@@ -194,7 +224,7 @@ function! s:SendTurn() abort
                 \ 'threadId': g:codex_vim_thread,
                 \ 'input': [{
                 \   'type': 'text',
-                \   'text': g:codex_vim_prompt
+                \   'text': g:codex_vim_pending_prompt
                 \ }]
                 \ }, 'turn')
 endfunction
@@ -259,13 +289,69 @@ function! s:CleanAnswer(text) abort
 endfunction
 
 
+function! s:ExtractJsonObject(text) abort
+    let l:start = -1
+    let l:depth = 0
+    let l:in_string = 0
+    let l:escaped = 0
+
+    let l:i = 0
+    while l:i < strlen(a:text)
+        let l:char = strpart(a:text, l:i, 1)
+
+        if l:start < 0
+            if l:char ==# '{'
+                let l:start = l:i
+                let l:depth = 1
+            endif
+        elseif l:in_string
+            if l:escaped
+                let l:escaped = 0
+            elseif l:char ==# '\'
+                let l:escaped = 1
+            elseif l:char ==# '"'
+                let l:in_string = 0
+            endif
+        else
+            if l:char ==# '"'
+                let l:in_string = 1
+            elseif l:char ==# '{'
+                let l:depth += 1
+            elseif l:char ==# '}'
+                let l:depth -= 1
+
+                if l:depth == 0
+                    return strpart(
+                                \ a:text,
+                                \ l:start,
+                                \ l:i - l:start + 1)
+                endif
+            endif
+        endif
+
+        let l:i += 1
+    endwhile
+
+    return ''
+endfunction
+
+
 function! s:HandleResponse(text) abort
     let g:codex_vim_last_turn_output = a:text
     let g:codex_vim_output = ''
 
     " Parse the model response as a JSON object.
+    let l:json = s:ExtractJsonObject(a:text)
+
+    if empty(l:json)
+        call s:LogAppend(
+                    \ "[Hiba: a Codex válaszában nem található JSON-objektum.]\n"
+                    \ . a:text . "\n")
+        return
+    endif
+
     try
-        let l:response = json_decode(trim(a:text))
+        let l:response = json_decode(l:json)
     catch
         call s:LogAppend(
                     \ "[Hiba: a Codex válasza nem érvényes JSON.]\n"
@@ -289,7 +375,7 @@ function! s:HandleResponse(text) abort
     endif
 
     if l:mode ==# 'diff'
-        if type(l:code) != v:t_string || empty(l:code)
+        if type(l:code) != v:t_string
             call s:LogAppend(
                         \ "[Hiba: a diff válaszból hiányzik "
                         \ . "az érvényes code mező.]\n"
@@ -422,10 +508,23 @@ function! s:OnOut(channel, line) abort
         return
     endif
 
+    " Log incoming messages separately from JSON parsing.
+    try
+        call writefile(
+                    \ [a:line],
+                    \ expand('~/.vim/plugin/codex/codex-vim-incoming.log'),
+                    \ 'a')
+    catch
+        " Logging failure must not prevent message processing.
+    endtry
+
+    " Parse the incoming JSON message.
     try
         let l:msg = json_decode(a:line)
     catch
-        call s:Append("\n[Codex: invalid JSON response]")
+        call s:Append(
+                    \ "\n[Codex: invalid JSON response: "
+                    \ . v:exception . "]")
         return
     endtry
 
@@ -619,10 +718,17 @@ function! s:OpenPrompt(prompt, has_selection, first, last) abort
         return
     endif
 
-    " If opened from Codex-Log, preserve the previous source context.
-    if bufnr('%') == g:codex_vim_log_buf
-                \ && g:codex_vim_source_buf > 0
-                \ && bufexists(g:codex_vim_source_buf)
+    let l:from_log = bufnr('%') == g:codex_vim_log_buf
+
+    if l:from_log
+        if g:codex_vim_source_buf <= 0
+                    \ || !bufexists(g:codex_vim_source_buf)
+                    \ || g:codex_vim_source_buf
+                    \ == g:codex_vim_log_buf
+                    \ || empty(g:codex_vim_source_path)
+            echoerr 'Nincs érvényes forrásfájl-kontextus.'
+            return
+        endif
 
         let l:source_buf = g:codex_vim_source_buf
         let l:source_lines = copy(g:codex_vim_source_lines)
@@ -631,23 +737,22 @@ function! s:OpenPrompt(prompt, has_selection, first, last) abort
         let l:has_selection = g:codex_vim_source_selection
         let l:first = g:codex_vim_source_first
         let l:last = g:codex_vim_source_last
-
+        let l:source_winid = get(g:, 'codex_vim_source_winid', -1)
     else
-        " Otherwise capture the current source buffer normally.
         let l:source_buf = bufnr('%')
         let l:source_lines = getline(1, '$')
         let l:source_path = expand('%:p')
         let l:cwd = getcwd()
         let l:has_selection = a:has_selection
-
         let l:first = a:has_selection ? a:first : 1
-        let l:last = a:has_selection
-                    \ ? a:last
-                    \ : len(l:source_lines)
+        let l:last = a:has_selection ? a:last : len(l:source_lines)
+        let l:source_winid = win_getid()
     endif
 
     let g:codex_vim_prompt_context = {
                 \ 'winid': win_getid(),
+                \ 'source_winid': l:source_winid,
+                \ 'from_log': l:from_log,
                 \ 'source_buf': l:source_buf,
                 \ 'source_lines': l:source_lines,
                 \ 'source_path': l:source_path,
@@ -657,7 +762,14 @@ function! s:OpenPrompt(prompt, has_selection, first, last) abort
                 \ 'last': l:last
                 \ }
 
-    botright 8new
+    if l:from_log
+        " Reuse the chat window instead of creating another split.
+        resize 8
+        silent enew
+    else
+        botright 8new
+    endif
+
     silent file Codex-Prompt
 
     setlocal buftype=nofile
@@ -700,11 +812,16 @@ function! s:SubmitPrompt() abort
     let l:ctx = copy(g:codex_vim_prompt_context)
     let g:codex_vim_prompt_context = {}
 
-    close
+    if get(l:ctx, 'from_log', 0)
+        " Restore the chat buffer in the same window.
+        execute 'buffer ' . g:codex_vim_log_buf
+    else
+        close
 
-    if !win_gotoid(l:ctx.winid)
-        echoerr 'Could not return to the original Vim window'
-        return
+        if !win_gotoid(l:ctx.winid)
+            echoerr 'Could not return to the original Vim window'
+            return
+        endif
     endif
 
     call s:StartRequest(l:prompt, l:ctx)
@@ -721,6 +838,7 @@ function! s:StartRequest(prompt, ctx) abort
         return
     endif
 
+    let g:codex_vim_source_winid = get(a:ctx, 'source_winid', a:ctx.winid)
     let g:codex_vim_source_buf = a:ctx.source_buf
     let g:codex_vim_source_path = a:ctx.source_path
     let g:codex_vim_source_lines = copy(a:ctx.source_lines)
@@ -748,12 +866,16 @@ function! s:StartRequest(prompt, ctx) abort
                 \ . "{\"mode\":\"answer\","
                 \ . "\"explanation\":\"Your answer\","
                 \ . "\"code\":null}\n"
-                \ . "For an actual requested file modification, use "
-                \ . "\"mode\":\"diff\" and put the complete replacement "
-                \ . "text in the string field \"code\".\n"
-                \ . "For questions, explanations and illustrative "
-                \ . "code examples, use \"mode\":\"answer\" and "
-                \ . "set \"code\" to null.\n"
+                \ . "Use \"mode\":\"diff\" whenever the user asks to modify, "
+                \ . "fix, improve, refactor, clean up, or correct the current "
+                \ . "file, including fixing issues identified in a code review. "
+                \ . "Also use diff mode when the user asks for the modified code, "
+                \ . "a patch, or a diff for previously discussed changes. "
+                \ . "Put the complete replacement text in the string field "
+                \ . "\"code\".\n"
+                \ . "Use \"mode\":\"answer\" only for questions, explanations, "
+                \ . "or illustrative code examples that do not request changes "
+                \ . "to the current file. In answer mode, set \"code\" to null.\n"
                 \ . "Always include all three fields: mode, "
                 \ . "explanation and code.\n"
                 \ . "For diff, code must replace only the selected "
@@ -783,6 +905,8 @@ function! s:StartRequest(prompt, ctx) abort
                     \ . "MODE diff, CODE must contain the complete "
                     \ . "replacement file.\n"
     endif
+
+    let g:codex_vim_pending_prompt = g:codex_vim_prompt
 
     call s:ShowLog()
 
