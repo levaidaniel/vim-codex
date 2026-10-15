@@ -598,10 +598,12 @@ function! s:OnOut(channel, line) abort
     elseif l:method ==# 'turn/completed'
         let g:codex_vim_busy = 0
 
-        let l:response = g:codex_vim_response_stream
+        " Prefer the complete final response from turn/completed.
+        let l:response = s:ExtractFinalText(l:params)
 
+        " Fall back to the accumulated stream only if necessary.
         if empty(l:response)
-            let l:response = s:ExtractFinalText(l:params)
+            let l:response = g:codex_vim_response_stream
         endif
 
         let g:codex_vim_response_stream = ''
